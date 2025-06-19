@@ -101,6 +101,10 @@ shift_schema = ShiftSchema()
 shifts_schema = ShiftSchema(many=True)
 recurring_shift_schema = RecurringShiftSchema()
 recurring_shifts_schema = RecurringShiftSchema(many=True)
+@app.route('/')
+def home():
+    """A simple welcome route to confirm the backend is running."""
+    return "Welcome to the Rota App Backend!"
 
 # --- API Routes ---
 
