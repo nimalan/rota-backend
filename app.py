@@ -33,11 +33,12 @@ def send_email(recipient_email, recipient_name, subject, body):
     if not brevo_api_key or not sender_email:
         print("!!! Email not sent: BREVO_API_KEY or SENDER_EMAIL not set.")
         return False
-    # ... (email sending logic remains the same)
+    
     api_url = 'https://api.brevo.com/v3/smtp/email'
     headers = {'accept': 'application/json', 'api-key': brevo_api_key, 'content-type': 'application/json'}
     payload = {"sender": {"name": sender_name, "email": sender_email}, "to": [{"email": recipient_email, "name": recipient_name}], "subject": subject, "htmlContent": f"<html><body><p>{body.replace(os.linesep, '<br>')}</p></body></html>"}
     response = requests.post(api_url, json=payload, headers=headers)
+    
     if response.status_code == 201:
         print(f"Email successfully sent to {recipient_email}")
         return True
@@ -60,17 +61,13 @@ class Shift(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=True)
     user = db.relationship('User', backref=db.backref('shifts', lazy=True))
 
-# --- NEW: Recurring Shift Model ---
 class RecurringShift(db.Model):
-    """Stores the templates for weekly recurring shifts."""
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    # Day of the week: 0=Monday, 1=Tuesday, ..., 6=Sunday
     day_of_week = db.Column(db.Integer, nullable=False) 
     start_time = db.Column(db.Time, nullable=False)
     end_time = db.Column(db.Time, nullable=False)
     user = db.relationship('User', backref=db.backref('recurring_shifts', lazy=True))
-
 
 # --- API Schemas ---
 class UserSchema(ma.SQLAlchemyAutoSchema):
@@ -86,7 +83,6 @@ class ShiftSchema(ma.SQLAlchemyAutoSchema):
         load_instance = True
     user = ma.Nested(UserSchema, only=("id", "username", "email"))
 
-# --- NEW: Recurring Shift Schema ---
 class RecurringShiftSchema(ma.SQLAlchemyAutoSchema):
     class Meta:
         model = RecurringShift
@@ -101,14 +97,11 @@ shift_schema = ShiftSchema()
 shifts_schema = ShiftSchema(many=True)
 recurring_shift_schema = RecurringShiftSchema()
 recurring_shifts_schema = RecurringShiftSchema(many=True)
-@app.route('/')
-def home():
-    """A simple welcome route to confirm the backend is running."""
-    return "Welcome to the Rota App Backend!"
 
 # --- API Routes ---
 
-# (Login and User routes remain the same)
+@app.route('/')
+def home(): return "Welcome to the Rota App Backend!"
 @app.route('/login', methods=['POST'])
 def login():
     data = request.get_json()
@@ -127,62 +120,60 @@ def add_user():
     send_email(new_user.email, new_user.username, "Welcome to the Rota App!", f"Hi {new_user.username},{os.linesep}{os.linesep}Your account has been created.")
     return user_schema.jsonify(new_user), 201
 
-# --- UPDATED: Shift Endpoints ---
+# --- THIS IS THE FIX: The /shifts endpoint is now more flexible ---
 @app.route('/shifts', methods=['GET'])
 def get_shifts():
     start_date_str = request.args.get('start_date')
     end_date_str = request.args.get('end_date')
 
+    # If date parameters are not provided, default to the current month.
     if not start_date_str or not end_date_str:
-        return jsonify({"message": "start_date and end_date parameters are required"}), 400
+        today = datetime.utcnow()
+        start_date = today.replace(day=1).date()
+        next_month = today.replace(day=28) + timedelta(days=4)
+        end_date = (next_month - timedelta(days=next_month.day)).date()
+    else:
+        start_date = datetime.fromisoformat(start_date_str.replace('Z', '')).date()
+        end_date = datetime.fromisoformat(end_date_str.replace('Z', '')).date()
 
-    start_date = datetime.fromisoformat(start_date_str).date()
-    end_date = datetime.fromisoformat(end_date_str).date()
-
-    # 1. Get standard one-off shifts
-    one_off_shifts = Shift.query.filter(Shift.start_time >= start_date, Shift.start_time <= end_date).all()
+    # Get standard one-off shifts
+    one_off_shifts = Shift.query.filter(db.func.date(Shift.start_time) >= start_date, db.func.date(Shift.start_time) <= end_date).all()
     
-    # 2. Generate recurring shifts for the date range
+    # Generate recurring shifts
     generated_shifts = []
     recurring_templates = RecurringShift.query.all()
     
     current_date = start_date
     while current_date <= end_date:
-        for template in recurring_templates:
-            if current_date.weekday() == template.day_of_week:
-                # Combine date with time to create a full datetime object
-                start_dt = datetime.combine(current_date, template.start_time)
-                end_dt = datetime.combine(current_date, template.end_time)
-                
-                # Create a temporary Shift object (without saving it)
-                generated_shift = Shift(
-                    id=f"rec-{template.id}-{current_date.strftime('%Y%m%d')}", # Unique ID for the frontend
-                    user_id=template.user_id,
-                    start_time=start_dt,
-                    end_time=end_dt,
-                    user=template.user # Associate the user object
-                )
-                generated_shifts.append(generated_shift)
+        if current_date.weekday() in [template.day_of_week for template in recurring_templates]:
+            for template in recurring_templates:
+                if current_date.weekday() == template.day_of_week:
+                    start_dt = datetime.combine(current_date, template.start_time)
+                    end_dt = datetime.combine(current_date, template.end_time)
+                    generated_shift = Shift(
+                        id=f"rec-{template.id}-{current_date.strftime('%Y%m%d')}",
+                        user_id=template.user_id,
+                        start_time=start_dt,
+                        end_time=end_dt,
+                        user=template.user
+                    )
+                    generated_shifts.append(generated_shift)
         current_date += timedelta(days=1)
 
-    # 3. Combine both lists
     all_shifts = one_off_shifts + generated_shifts
     return jsonify(shifts_schema.dump(all_shifts))
 
-# (POST, PUT, DELETE for one-off shifts remain largely the same)
 @app.route('/shifts', methods=['POST'])
 def add_shift():
-    # This now only creates one-off shifts
     data = request.get_json()
     start_time = datetime.fromisoformat(data['start_time'].replace('Z', ''))
     end_time = datetime.fromisoformat(data['end_time'].replace('Z', ''))
     new_shift = Shift(start_time=start_time, end_time=end_time, user_id=data.get('user_id'))
     db.session.add(new_shift)
     db.session.commit()
-    # ... (email notification logic)
+    # ... email notification logic ...
     return shift_schema.jsonify(new_shift), 201
 
-# --- NEW: Endpoints for Recurring Shift Templates ---
 @app.route('/recurring-shifts', methods=['GET'])
 def get_recurring_shifts():
     templates = RecurringShift.query.order_by(RecurringShift.day_of_week, RecurringShift.start_time).all()
@@ -191,9 +182,6 @@ def get_recurring_shifts():
 @app.route('/recurring-shifts', methods=['POST'])
 def add_recurring_shift():
     data = request.get_json()
-    if 'user_id' not in data or 'day_of_week' not in data or 'start_time' not in data or 'end_time' not in data:
-        return jsonify({"message": "Missing required fields"}), 400
-        
     new_template = RecurringShift(
         user_id=data['user_id'],
         day_of_week=data['day_of_week'],
@@ -209,10 +197,9 @@ def delete_recurring_shift(id):
     template = RecurringShift.query.get_or_404(id)
     db.session.delete(template)
     db.session.commit()
-    return jsonify({"message": "Recurring shift template deleted successfully."})
+    return jsonify({"message": "Recurring shift template deleted."})
 
-
-# (Other endpoints like get_users, delete_user, etc. are omitted for brevity but should remain in your file)
+# ... other endpoints like get_users, delete_user, etc.
 @app.route('/users', methods=['GET'])
 def get_users(): return jsonify(users_schema.dump(User.query.all()))
 @app.route('/users/<int:id>', methods=['DELETE'])
