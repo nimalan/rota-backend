@@ -1,8 +1,8 @@
-"""Initial database creation
+"""Re-create database with new shift recurrence logic
 
-Revision ID: 6826768e20a9
+Revision ID: e17349247205
 Revises: 
-Create Date: 2025-06-18 20:31:20.573193
+Create Date: 2025-06-20 23:20:25.154679
 
 """
 from alembic import op
@@ -10,7 +10,7 @@ import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision = '6826768e20a9'
+revision = 'e17349247205'
 down_revision = None
 branch_labels = None
 depends_on = None
@@ -33,6 +33,7 @@ def upgrade():
     sa.Column('start_time', sa.DateTime(), nullable=False),
     sa.Column('end_time', sa.DateTime(), nullable=False),
     sa.Column('user_id', sa.Integer(), nullable=True),
+    sa.Column('recurring_shift_id', sa.String(length=36), nullable=True),
     sa.ForeignKeyConstraint(['user_id'], ['user.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
