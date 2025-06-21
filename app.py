@@ -29,15 +29,13 @@ db = SQLAlchemy(app)
 ma = Marshmallow(app)
 migrate = Migrate(app, db)
 
-# --- Database Models and Schemas (remain the same) ---
+# --- Database Models and Schemas ---
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(80), unique=True, nullable=False)
     email = db.Column(db.String(120), unique=True, nullable=False)
     role = db.Column(db.String(20), nullable=False, default='employee')
     password = db.Column(db.String(128), nullable=False)
-
-# ... (other models and schemas)
 
 class Shift(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -77,28 +75,47 @@ holiday_schema=HolidaySchema(); holidays_schema=HolidaySchema(many=True)
 @app.route('/')
 def home(): return "Welcome!"
 
-# --- NEW: One-Time Admin Setup Route ---
+# --- UPDATED: One-Time Admin Setup/Reset Route ---
 @app.route('/setup-admin', methods=['GET'])
 def setup_admin():
     with app.app_context():
-        if User.query.filter_by(role='admin').first():
-            return jsonify({"message": "An admin user already exists."}), 409
-
-        print("No admin user found. Creating default admin...")
+        # Find the admin user by email
+        admin_user = User.query.filter_by(email='admin@example.com').first()
+        
         hashed_password = bcrypt.generate_password_hash("password").decode('utf-8')
-        admin_user = User(
-            username='admin',
-            email='admin@example.com',
-            password=hashed_password,
-            role='admin'
-        )
-        db.session.add(admin_user)
-        db.session.commit()
-        print("Default admin created successfully.")
-        return jsonify({"message": "Default admin created successfully. You can now log in."}), 201
+
+        if admin_user:
+            # If the admin exists, just update their password to ensure it's correct
+            admin_user.password = hashed_password
+            db.session.commit()
+            print("Default admin password has been reset.")
+            return jsonify({"message": "Default admin password has been reset. You can now log in."}), 200
+        else:
+            # If the admin does not exist, create it
+            print("No admin user found. Creating default admin...")
+            new_admin = User(
+                username='admin',
+                email='admin@example.com',
+                password=hashed_password,
+                role='admin'
+            )
+            db.session.add(new_admin)
+            db.session.commit()
+            print("Default admin created successfully.")
+            return jsonify({"message": "Default admin created successfully. You can now log in."}), 201
 
 # (All other routes like /login, /users, /shifts, etc. should be included here)
-# ...
+@app.route('/login', methods=['POST'])
+def login():
+    data = request.get_json()
+    user = User.query.filter_by(email=data.get('email')).first()
+
+    if user and bcrypt.check_password_hash(user.password, data.get('password', '')):
+        return user_schema.jsonify(user)
+    
+    return jsonify({'message': 'Invalid credentials'}), 401
+
+# ... other routes
 
 if __name__ == '__main__':
     app.run(debug=True)
