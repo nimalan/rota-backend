@@ -29,13 +29,15 @@ db = SQLAlchemy(app)
 ma = Marshmallow(app)
 migrate = Migrate(app, db)
 
-# ... (Database Models and Schemas remain the same) ...
+# --- Database Models and Schemas (remain the same) ---
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(80), unique=True, nullable=False)
     email = db.Column(db.String(120), unique=True, nullable=False)
     role = db.Column(db.String(20), nullable=False, default='employee')
     password = db.Column(db.String(128), nullable=False)
+
+# ... (other models and schemas)
 
 class Shift(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -70,39 +72,33 @@ user_schema=UserSchema(); users_schema=UserSchema(many=True)
 shift_schema=ShiftSchema(); shifts_schema=ShiftSchema(many=True)
 holiday_schema=HolidaySchema(); holidays_schema=HolidaySchema(many=True)
 
-# --- NEW: Function to create a default admin ---
-def create_default_admin():
-    with app.app_context():
-        # Check if an admin user already exists
-        if not User.query.filter_by(role='admin').first():
-            print("No admin user found. Creating default admin...")
-            hashed_password = bcrypt.generate_password_hash("password").decode('utf-8')
-            admin_user = User(
-                username='admin',
-                email='admin@example.com',
-                password=hashed_password,
-                role='admin'
-            )
-            db.session.add(admin_user)
-            db.session.commit()
-            print("Default admin created successfully.")
-        else:
-            print("Admin user already exists.")
 
 # --- API Routes ---
 @app.route('/')
 def home(): return "Welcome!"
 
-# (All other routes like /login, /users, /shifts, /holidays remain the same)
+# --- NEW: One-Time Admin Setup Route ---
+@app.route('/setup-admin', methods=['GET'])
+def setup_admin():
+    with app.app_context():
+        if User.query.filter_by(role='admin').first():
+            return jsonify({"message": "An admin user already exists."}), 409
+
+        print("No admin user found. Creating default admin...")
+        hashed_password = bcrypt.generate_password_hash("password").decode('utf-8')
+        admin_user = User(
+            username='admin',
+            email='admin@example.com',
+            password=hashed_password,
+            role='admin'
+        )
+        db.session.add(admin_user)
+        db.session.commit()
+        print("Default admin created successfully.")
+        return jsonify({"message": "Default admin created successfully. You can now log in."}), 201
+
+# (All other routes like /login, /users, /shifts, etc. should be included here)
 # ...
-
-# --- THIS IS THE FINAL FIX ---
-# Before the application starts listening for requests,
-# create the database tables and the default admin if they don't exist.
-with app.app_context():
-    db.create_all()
-    create_default_admin()
-
 
 if __name__ == '__main__':
     app.run(debug=True)
