@@ -4,7 +4,7 @@ from flask import Flask, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
 from flask_marshmallow import Marshmallow
-from marshmallow import fields # --- THIS IS THE CORRECT IMPORT ---
+from marshmallow import fields as ma_fields # --- FIX: Using an alias for clarity ---
 from flask_cors import CORS
 from datetime import datetime, time, timedelta, timezone
 from dateutil.relativedelta import relativedelta
@@ -52,8 +52,9 @@ class UserSchema(ma.SQLAlchemyAutoSchema):
     class Meta:
         model = User; load_instance = True; exclude = ("password",) 
 class ShiftSchema(ma.SQLAlchemyAutoSchema):
-    start_time = fields.DateTime(format='iso')
-    end_time = fields.DateTime(format='iso')
+    # --- FIX: Using the aliased import ---
+    start_time = ma_fields.DateTime(format='iso')
+    end_time = ma_fields.DateTime(format='iso')
     class Meta:
         model = Shift; include_fk = True; load_instance = True
     user = ma.Nested(UserSchema, only=("id", "username"))
