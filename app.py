@@ -3,14 +3,15 @@ import requests
 from flask import Flask, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
-from flask_marshmallow import Marshmallow, fields
+from flask_marshmallow import Marshmallow
+from marshmallow import fields # --- THIS IS THE CORRECT IMPORT ---
 from flask_cors import CORS
 from datetime import datetime, time, timedelta, timezone
 from dateutil.relativedelta import relativedelta
 from flask_bcrypt import Bcrypt
 from dotenv import load_dotenv
 
-# FINAL-VERSION-CHECK-BACKEND-V18
+# FINAL-VERSION-CHECK-BACKEND-V19
 load_dotenv()
 
 # --- Initialization & Configuration ---
