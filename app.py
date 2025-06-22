@@ -4,14 +4,14 @@ from flask import Flask, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
 from flask_marshmallow import Marshmallow
-from marshmallow import fields as ma_fields # --- FIX: Using an alias for clarity ---
+from marshmallow import fields as ma_fields 
 from flask_cors import CORS
 from datetime import datetime, time, timedelta, timezone
 from dateutil.relativedelta import relativedelta
 from flask_bcrypt import Bcrypt
 from dotenv import load_dotenv
 
-# FINAL-VERSION-CHECK-BACKEND-V19
+# FINAL-VERSION-CHECK-BACKEND-V20
 load_dotenv()
 
 # --- Initialization & Configuration ---
@@ -35,9 +35,12 @@ migrate = Migrate(app, db)
 def safe_fromisoformat(date_string):
     """Safely create a timezone-aware UTC datetime object from an ISO string."""
     if isinstance(date_string, str) and date_string.endswith('Z'):
-        return datetime.fromisoformat(date_string.replace('Z', '+00:00'))
-    dt = datetime.fromisoformat(date_string)
+        dt = datetime.fromisoformat(date_string.replace('Z', '+00:00'))
+    else:
+        dt = datetime.fromisoformat(date_string)
+    
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
 
 # --- Database Models ---
 class User(db.Model):
@@ -52,7 +55,6 @@ class UserSchema(ma.SQLAlchemyAutoSchema):
     class Meta:
         model = User; load_instance = True; exclude = ("password",) 
 class ShiftSchema(ma.SQLAlchemyAutoSchema):
-    # --- FIX: Using the aliased import ---
     start_time = ma_fields.DateTime(format='iso')
     end_time = ma_fields.DateTime(format='iso')
     class Meta:
@@ -124,8 +126,9 @@ def create_shifts():
         duration_months = int(data.get('recurrence_months', 1)); end_date = start_time_aware + relativedelta(months=+duration_months)
         recurring_id = os.urandom(16).hex(); created_shifts = []; current_date = start_time_aware
         while current_date.date() < end_date.date():
-            shift_start_dt = current_date.replace(hour=shift_start_time.hour, minute=shift_start_time.minute, second=0, microsecond=0)
-            shift_end_dt = current_date.replace(hour=shift_end_time.hour, minute=shift_end_time.minute, second=0, microsecond=0)
+            # --- FIX: Use datetime.combine() to explicitly create timezone-aware objects ---
+            shift_start_dt = datetime.combine(current_date.date(), shift_start_time, tzinfo=timezone.utc)
+            shift_end_dt = datetime.combine(current_date.date(), shift_end_time, tzinfo=timezone.utc)
             new_shift = Shift(start_time=shift_start_dt, end_time=shift_end_dt, user_id=data.get('user_id'), recurring_shift_id=recurring_id)
             db.session.add(new_shift); created_shifts.append(new_shift)
             current_date += timedelta(weeks=1)
@@ -146,6 +149,7 @@ def update_shift(id):
         new_start_time_obj = new_start_dt.time(); new_end_time_obj = new_end_dt.time()
         for shift in future_shifts:
             date = shift.start_time.date()
+            # --- FIX: Use datetime.combine() to explicitly create timezone-aware objects ---
             shift.start_time = datetime.combine(date, new_start_time_obj, tzinfo=timezone.utc)
             shift.end_time = datetime.combine(date, new_end_time_obj, tzinfo=timezone.utc)
             shift.user_id = data.get('user_id', shift.user_id)
