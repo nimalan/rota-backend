@@ -3,14 +3,15 @@ import requests
 from flask import Flask, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
-from flask_marshmallow import Marshmallow, fields
+from flask_marshmallow import Marshmallow
+from marshmallow import fields # --- THIS IS THE FIX ---
 from flask_cors import CORS
 from datetime import datetime, time, timedelta
 from dateutil.relativedelta import relativedelta
 from flask_bcrypt import Bcrypt
 from dotenv import load_dotenv
 
-# FINAL-VERSION-CHECK-BACKEND-V4
+# FINAL-VERSION-CHECK-BACKEND-V5
 load_dotenv()
 
 # --- Initialization & Configuration ---
@@ -66,7 +67,6 @@ class HolidaySchema(ma.SQLAlchemyAutoSchema):
 user_schema=UserSchema(); users_schema=UserSchema(many=True)
 shift_schema=ShiftSchema(); shifts_schema=ShiftSchema(many=True)
 holiday_schema=HolidaySchema(); holidays_schema=HolidaySchema(many=True)
-
 
 # --- API Routes ---
 @app.route('/')
@@ -133,8 +133,64 @@ def create_shifts():
         db.session.commit()
         return jsonify(shifts_schema.dump(created_shifts)), 201
 
-# (All other PUT, DELETE, and holiday routes are also included and correct)
-# ...
+@app.route('/shifts/<int:id>', methods=['PUT'])
+def update_shift(id):
+    shift_to_update = Shift.query.get_or_404(id); data = request.get_json(); apply_to_all = data.get('apply_to_all', False)
+    if not apply_to_all or not shift_to_update.recurring_shift_id:
+        shift_to_update.start_time = safe_fromisoformat(data['start_time']); shift_to_update.end_time = safe_fromisoformat(data['end_time'])
+        shift_to_update.user_id = data.get('user_id', shift_to_update.user_id); shift_to_update.recurring_shift_id = None 
+        db.session.commit(); return shift_schema.jsonify(shift_to_update)
+    else:
+        recurring_id = shift_to_update.recurring_shift_id
+        future_shifts = Shift.query.filter(Shift.recurring_shift_id == recurring_id, Shift.start_time >= shift_to_update.start_time).all()
+        new_start_time = safe_fromisoformat(data['start_time']).time(); new_end_time = safe_fromisoformat(data['end_time']).time()
+        for shift in future_shifts:
+            shift.start_time = shift.start_time.replace(hour=new_start_time.hour, minute=new_start_time.minute, second=0, microsecond=0)
+            shift.end_time = shift.start_time.replace(hour=new_end_time.hour, minute=new_end_time.minute, second=0, microsecond=0)
+            shift.user_id = data.get('user_id', shift.user_id)
+        db.session.commit(); return jsonify(shifts_schema.dump(future_shifts))
+
+@app.route('/shifts/<int:id>', methods=['DELETE'])
+def delete_shift(id):
+    shift_to_delete = Shift.query.get_or_404(id)
+    data = request.get_json() or {}
+    apply_to_all = data.get('apply_to_all', False)
+    if not apply_to_all or not shift_to_delete.recurring_shift_id:
+        db.session.delete(shift_to_delete); db.session.commit()
+        return jsonify({'message': 'Shift deleted successfully.'})
+    else:
+        recurring_id = shift_to_delete.recurring_shift_id
+        future_shifts = Shift.query.filter(Shift.recurring_shift_id == recurring_id, Shift.start_time >= shift_to_delete.start_time).all()
+        for shift in future_shifts:
+            db.session.delete(shift)
+        db.session.commit()
+        return jsonify({'message': f'{len(future_shifts)} recurring shifts deleted.'})
+
+@app.route('/holidays', methods=['GET'])
+def get_holidays():
+    return jsonify(holidays_schema.dump(Holiday.query.all()))
+
+@app.route('/holidays', methods=['POST'])
+def request_holiday():
+    data = request.get_json()
+    new_holiday = Holiday(user_id=data['user_id'], start_date=safe_fromisoformat(data['start_date']).date(), end_date=safe_fromisoformat(data['end_date']).date(), notes=data.get('notes'))
+    db.session.add(new_holiday); db.session.commit()
+    return holiday_schema.jsonify(new_holiday), 201
+
+@app.route('/holidays/<int:id>', methods=['PUT'])
+def amend_holiday(id):
+    holiday = Holiday.query.get_or_404(id); data = request.get_json()
+    if 'status' in data and data['status'] in ['approved', 'rejected']:
+        holiday.status = data['status']
+    db.session.commit(); return holiday_schema.jsonify(holiday)
+
+@app.route('/holidays/<int:id>', methods=['DELETE'])
+def delete_holiday(id):
+    holiday = Holiday.query.get_or_404(id)
+    db.session.delete(holiday); db.session.commit()
+    return jsonify({"message": "Holiday deleted"}), 200
 
 if __name__ == '__main__':
+    with app.app_context():
+        db.create_all()
     app.run(debug=True)
