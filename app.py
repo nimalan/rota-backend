@@ -1,14 +1,12 @@
 import os
-import uuid
-from datetime import datetime, timedelta
-from dateutil.relativedelta import relativedelta
-from dateutil.parser import isoparse
-
+import requests
 from flask import Flask, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
 from flask_marshmallow import Marshmallow
 from flask_cors import CORS
+from datetime import datetime, time, timedelta
+from dateutil.relativedelta import relativedelta
 from flask_bcrypt import Bcrypt
 from dotenv import load_dotenv
 
@@ -23,38 +21,21 @@ bcrypt = Bcrypt(app)
 db_url = os.environ.get('DATABASE_URL')
 if db_url and db_url.startswith("postgres://"):
     db_url = db_url.replace("postgres://", "postgresql://", 1)
-
-app.config['SQLALCHEMY_DATABASE_URI'] = db_url or \
-    'sqlite:///' + os.path.join(os.path.abspath(os.path.dirname(__file__)), 'rota.db')
+app.config['SQLALCHEMY_DATABASE_URI'] = db_url or 'sqlite:///' + os.path.join(os.path.abspath(os.path.dirname(__file__)), 'rota.db')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-
 if db_url:
-    app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
-        "connect_args": {"options": "-c timezone=utc"}
-    }
+    app.config['SQLALCHEMY_ENGINE_OPTIONS'] = { "connect_args": {"options": "-c timezone=utc"} }
 
 # --- Extensions ---
 db = SQLAlchemy(app)
 ma = Marshmallow(app)
 migrate = Migrate(app, db)
 
-# --- Helper Functions ---
-def parse_iso_datetime(date_string):
-    """Parse ISO 8601 datetime string with proper timezone handling"""
-    try:
-        dt = isoparse(date_string)
-        if not dt.tzinfo:
-            dt = dt.replace(tzinfo=datetime.timezone.utc)
-        return dt
-    except (ValueError, TypeError) as e:
-        raise ValueError(f"Invalid datetime format: {date_string}") from e
-
-def validate_shift_times(start_time, end_time):
-    """Validate that shift times are logical"""
-    if start_time >= end_time:
-        raise ValueError("End time must be after start time")
-    if (end_time - start_time) > timedelta(hours=24):
-        raise ValueError("Shift duration cannot exceed 24 hours")
+# --- Datetime Helper Function ---
+def safe_fromisoformat(date_string):
+    if isinstance(date_string, str) and date_string.endswith('Z'):
+        return datetime.fromisoformat(date_string.replace('Z', '+00:00'))
+    return datetime.fromisoformat(date_string)
 
 # --- Database Models ---
 class User(db.Model):
@@ -70,7 +51,7 @@ class Shift(db.Model):
     end_time = db.Column(db.DateTime(timezone=True), nullable=False)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=True)
     user = db.relationship('User', backref=db.backref('shifts', lazy=True))
-    recurring_shift_id = db.Column(db.String(36), nullable=True, index=True)
+    recurring_shift_id = db.Column(db.String(36), nullable=True)
 
 class Holiday(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -84,226 +65,148 @@ class Holiday(db.Model):
 # --- API Schemas ---
 class UserSchema(ma.SQLAlchemyAutoSchema):
     class Meta:
-        model = User
-        load_instance = True
-        exclude = ("password",)
+        model = User; load_instance = True; exclude = ("password",) 
 
 class ShiftSchema(ma.SQLAlchemyAutoSchema):
     start_time = ma.DateTime(format='iso')
     end_time = ma.DateTime(format='iso')
-    
     class Meta:
-        model = Shift
-        include_fk = True
-        load_instance = True
-    
+        model = Shift; include_fk = True; load_instance = True
     user = ma.Nested(UserSchema, only=("id", "username", "email"))
 
 class HolidaySchema(ma.SQLAlchemyAutoSchema):
+    start_date = ma.Date(format='iso')
+    end_date = ma.Date(format='iso')
     class Meta:
-        model = Holiday
-        include_fk = True
-        load_instance = True
-    
+        model = Holiday; include_fk = True; load_instance = True
     user = ma.Nested(UserSchema, only=("id", "username"))
 
-# Initialize schemas
-user_schema = UserSchema()
-users_schema = UserSchema(many=True)
-shift_schema = ShiftSchema()
-shifts_schema = ShiftSchema(many=True)
-holiday_schema = HolidaySchema()
-holidays_schema = HolidaySchema(many=True)
+user_schema=UserSchema(); users_schema=UserSchema(many=True)
+shift_schema=ShiftSchema(); shifts_schema=ShiftSchema(many=True)
+holiday_schema=HolidaySchema(); holidays_schema=HolidaySchema(many=True)
 
 # --- API Routes ---
 @app.route('/')
-def home():
-    return jsonify({"message": "Welcome to the Rota API"})
+def home(): return "Welcome!"
+
+@app.route('/setup-admin', methods=['GET'])
+def setup_admin():
+    with app.app_context():
+        admin_user = User.query.filter_by(email='admin@example.com').first()
+        hashed_password = bcrypt.generate_password_hash("password").decode('utf-8')
+        if admin_user:
+            admin_user.password = hashed_password
+            db.session.commit()
+            return jsonify({"message": "Default admin password has been reset."}), 200
+        else:
+            new_admin = User(username='admin', email='admin@example.com', password=hashed_password, role='admin')
+            db.session.add(new_admin); db.session.commit()
+            return jsonify({"message": "Default admin created successfully."}), 201
 
 @app.route('/login', methods=['POST'])
 def login():
-    try:
-        data = request.get_json()
-        if not data or 'email' not in data or 'password' not in data:
-            return jsonify({'message': 'Email and password are required'}), 400
-        
-        user = User.query.filter_by(email=data['email']).first()
-        if user and bcrypt.check_password_hash(user.password, data['password']):
-            return user_schema.jsonify(user)
-        
-        return jsonify({'message': 'Invalid credentials'}), 401
-    except Exception as e:
-        return jsonify({'message': 'Login failed', 'error': str(e)}), 500
+    data = request.get_json(); user = User.query.filter_by(email=data.get('email')).first()
+    if user and bcrypt.check_password_hash(user.password, data.get('password', '')):
+        return user_schema.jsonify(user)
+    return jsonify({'message': 'Invalid credentials.'}), 401
 
 @app.route('/users', methods=['GET'])
-def get_users():
-    try:
-        users = User.query.all()
-        return jsonify(users_schema.dump(users))
-    except Exception as e:
-        return jsonify({'message': 'Failed to fetch users', 'error': str(e)}), 500
+def get_users(): return jsonify(users_schema.dump(User.query.all()))
+
+@app.route('/users', methods=['POST'])
+def add_user():
+    data = request.get_json(); hashed_password = bcrypt.generate_password_hash(data['password']).decode('utf-8')
+    new_user = User(username=data['username'], email=data['email'], password=hashed_password, role=data.get('role', 'employee'))
+    db.session.add(new_user); db.session.commit()
+    return user_schema.jsonify(new_user), 201
 
 @app.route('/shifts', methods=['GET'])
 def get_shifts():
-    try:
-        start_date_str = request.args.get('start_date')
-        end_date_str = request.args.get('end_date')
-        
-        if not start_date_str or not end_date_str:
-            return jsonify({"message": "Both start_date and end_date parameters are required"}), 400
-        
-        start_date = parse_iso_datetime(start_date_str)
-        end_date = parse_iso_datetime(end_date_str)
-        
-        if start_date > end_date:
-            return jsonify({"message": "start_date must be before end_date"}), 400
-        
-        shifts = Shift.query.filter(
-            Shift.start_time >= start_date,
-            Shift.start_time <= end_date
-        ).all()
-        
-        return jsonify(shifts_schema.dump(shifts))
-    except ValueError as e:
-        return jsonify({"message": "Invalid date format", "error": str(e)}), 400
-    except Exception as e:
-        return jsonify({"message": "Failed to fetch shifts", "error": str(e)}), 500
+    start_date_str = request.args.get('start_date'); end_date_str = request.args.get('end_date')
+    if not start_date_str or not end_date_str: return jsonify({"message": "date range required"}), 400
+    start_date = safe_fromisoformat(start_date_str); end_date = safe_fromisoformat(end_date_str)
+    shifts = Shift.query.filter(Shift.start_time >= start_date, Shift.start_time <= end_date).all()
+    return jsonify(shifts_schema.dump(shifts))
 
 @app.route('/shifts', methods=['POST'])
 def create_shifts():
-    try:
-        data = request.get_json()
-        if not data:
-            return jsonify({"message": "No data provided"}), 400
-
-        required_fields = ['start_time', 'end_time']
-        if not all(field in data for field in required_fields):
-            return jsonify({"message": f"Missing required fields: {', '.join(required_fields)}"}), 400
-
-        start_time = parse_iso_datetime(data['start_time'])
-        end_time = parse_iso_datetime(data['end_time'])
-        validate_shift_times(start_time, end_time)
-
-        is_recurring = data.get('is_recurring', False)
-        user_id = data.get('user_id')
-
-        if not is_recurring:
-            new_shift = Shift(
-                start_time=start_time,
-                end_time=end_time,
-                user_id=user_id
-            )
-            db.session.add(new_shift)
-            db.session.commit()
-            return shift_schema.jsonify(new_shift), 201
-        else:
-            # Recurring shift logic
-            recurrence_months = int(data.get('recurrence_months', 1))
-            recurrence_interval = data.get('recurrence_interval', 'weekly').lower()
-            
-            if recurrence_interval not in ['daily', 'weekly', 'monthly']:
-                return jsonify({"message": "Invalid recurrence interval"}), 400
-
-            end_date = start_time + relativedelta(months=+recurrence_months)
-            recurring_id = str(uuid.uuid4())
-            created_shifts = []
-            current_date = start_time
-
-            while current_date.date() <= end_date.date():
-                shift_start = current_date.replace(
-                    hour=start_time.hour,
-                    minute=start_time.minute,
-                    second=0,
-                    microsecond=0
-                )
-                shift_end = current_date.replace(
-                    hour=end_time.hour,
-                    minute=end_time.minute,
-                    second=0,
-                    microsecond=0
-                )
-
-                new_shift = Shift(
-                    start_time=shift_start,
-                    end_time=shift_end,
-                    user_id=user_id,
-                    recurring_shift_id=recurring_id
-                )
-                db.session.add(new_shift)
-                created_shifts.append(new_shift)
-
-                # Increment based on recurrence pattern
-                if recurrence_interval == 'daily':
-                    current_date += timedelta(days=1)
-                elif recurrence_interval == 'weekly':
-                    current_date += timedelta(weeks=1)
-                elif recurrence_interval == 'monthly':
-                    current_date += relativedelta(months=+1)
-
-            db.session.commit()
-            return jsonify(shifts_schema.dump(created_shifts)), 201
-
-    except ValueError as e:
-        return jsonify({"message": "Invalid input", "error": str(e)}), 400
-    except Exception as e:
-        db.session.rollback()
-        return jsonify({"message": "Failed to create shifts", "error": str(e)}), 500
+    data = request.get_json(); start_time_aware = safe_fromisoformat(data['start_time']); end_time_aware = safe_fromisoformat(data['end_time'])
+    is_recurring = data.get('is_recurring', False)
+    if not is_recurring:
+        new_shift = Shift(start_time=start_time_aware, end_time=end_time_aware, user_id=data.get('user_id'))
+        db.session.add(new_shift); db.session.commit()
+        return shift_schema.jsonify(new_shift), 201
+    else:
+        shift_start_time = start_time_aware.time(); shift_end_time = end_time_aware.time()
+        duration_months = int(data.get('recurrence_months', 1)); end_date = start_time_aware + relativedelta(months=+duration_months)
+        recurring_id = os.urandom(16).hex(); created_shifts = []; current_date = start_time_aware
+        while current_date.date() < end_date.date():
+            shift_start_dt = current_date.replace(hour=shift_start_time.hour, minute=shift_start_time.minute, second=0, microsecond=0)
+            shift_end_dt = current_date.replace(hour=shift_end_time.hour, minute=shift_end_time.minute, second=0, microsecond=0)
+            new_shift = Shift(start_time=shift_start_dt, end_time=shift_end_dt, user_id=data.get('user_id'), recurring_shift_id=recurring_id)
+            db.session.add(new_shift); created_shifts.append(new_shift)
+            current_date += timedelta(weeks=1)
+        db.session.commit()
+        return jsonify(shifts_schema.dump(created_shifts)), 201
 
 @app.route('/shifts/<int:id>', methods=['PUT'])
 def update_shift(id):
-    try:
-        shift_to_update = Shift.query.get_or_404(id)
-        data = request.get_json()
-        
-        if not data:
-            return jsonify({"message": "No data provided"}), 400
+    shift_to_update = Shift.query.get_or_404(id); data = request.get_json(); apply_to_all = data.get('apply_to_all', False)
+    if not apply_to_all or not shift_to_update.recurring_shift_id:
+        shift_to_update.start_time = safe_fromisoformat(data['start_time']); shift_to_update.end_time = safe_fromisoformat(data['end_time'])
+        shift_to_update.user_id = data.get('user_id', shift_to_update.user_id); shift_to_update.recurring_shift_id = None 
+        db.session.commit(); return shift_schema.jsonify(shift_to_update)
+    else:
+        recurring_id = shift_to_update.recurring_shift_id
+        future_shifts = Shift.query.filter(Shift.recurring_shift_id == recurring_id, Shift.start_time >= shift_to_update.start_time).all()
+        new_start_time = safe_fromisoformat(data['start_time']).time(); new_end_time = safe_fromisoformat(data['end_time']).time()
+        for shift in future_shifts:
+            shift.start_time = shift.start_time.replace(hour=new_start_time.hour, minute=new_start_time.minute, second=0, microsecond=0)
+            shift.end_time = shift.start_time.replace(hour=new_end_time.hour, minute=new_end_time.minute, second=0, microsecond=0)
+            shift.user_id = data.get('user_id', shift.user_id)
+        db.session.commit(); return jsonify(shifts_schema.dump(future_shifts))
 
-        required_fields = ['start_time', 'end_time']
-        if not all(field in data for field in required_fields):
-            return jsonify({"message": f"Missing required fields: {', '.join(required_fields)}"}), 400
+@app.route('/shifts/<int:id>', methods=['DELETE'])
+def delete_shift(id):
+    shift_to_delete = Shift.query.get_or_404(id)
+    data = request.get_json() or {}
+    apply_to_all = data.get('apply_to_all', False)
+    if not apply_to_all or not shift_to_delete.recurring_shift_id:
+        db.session.delete(shift_to_delete); db.session.commit()
+        return jsonify({'message': 'Shift deleted successfully.'})
+    else:
+        recurring_id = shift_to_delete.recurring_shift_id
+        future_shifts = Shift.query.filter(Shift.recurring_shift_id == recurring_id, Shift.start_time >= shift_to_delete.start_time).all()
+        for shift in future_shifts:
+            db.session.delete(shift)
+        db.session.commit()
+        return jsonify({'message': f'{len(future_shifts)} recurring shifts deleted.'})
 
-        new_start_time = parse_iso_datetime(data['start_time'])
-        new_end_time = parse_iso_datetime(data['end_time'])
-        validate_shift_times(new_start_time, new_end_time)
+@app.route('/holidays', methods=['GET'])
+def get_holidays():
+    return jsonify(holidays_schema.dump(Holiday.query.all()))
 
-        apply_to_all = data.get('apply_to_all', False)
-        user_id = data.get('user_id', shift_to_update.user_id)
+@app.route('/holidays', methods=['POST'])
+def request_holiday():
+    data = request.get_json()
+    new_holiday = Holiday(user_id=data['user_id'], start_date=safe_fromisoformat(data['start_date']).date(), end_date=safe_fromisoformat(data['end_date']).date(), notes=data.get('notes'))
+    db.session.add(new_holiday); db.session.commit()
+    return holiday_schema.jsonify(new_holiday), 201
 
-        if not apply_to_all or not shift_to_update.recurring_shift_id:
-            # Update single shift
-            shift_to_update.start_time = new_start_time
-            shift_to_update.end_time = new_end_time
-            shift_to_update.user_id = user_id
-            shift_to_update.recurring_shift_id = None
-            db.session.commit()
-            return shift_schema.jsonify(shift_to_update)
-        else:
-            # Update all future recurring shifts
-            recurring_id = shift_to_update.recurring_shift_id
-            future_shifts = Shift.query.filter(
-                Shift.recurring_shift_id == recurring_id,
-                Shift.start_time >= shift_to_update.start_time
-            ).all()
+@app.route('/holidays/<int:id>', methods=['PUT'])
+def amend_holiday(id):
+    holiday = Holiday.query.get_or_404(id); data = request.get_json()
+    if 'status' in data and data['status'] in ['approved', 'rejected']:
+        holiday.status = data['status']
+    db.session.commit(); return holiday_schema.jsonify(holiday)
 
-            for shift in future_shifts:
-                shift.start_time = shift.start_time.replace(
-                    hour=new_start_time.hour,
-                    minute=new_start_time.minute
-                )
-                shift.end_time = shift.end_time.replace(
-                    hour=new_end_time.hour,
-                    minute=new_end_time.minute
-                )
-                shift.user_id = user_id
-
-            db.session.commit()
-            return jsonify(shifts_schema.dump(future_shifts))
-
-    except ValueError as e:
-        return jsonify({"message": "Invalid input", "error": str(e)}), 400
-    except Exception as e:
-        db.session.rollback()
-        return jsonify({"message": "Failed to update shift", "error": str(e)}), 500
+@app.route('/holidays/<int:id>', methods=['DELETE'])
+def delete_holiday(id):
+    holiday = Holiday.query.get_or_404(id)
+    db.session.delete(holiday); db.session.commit()
+    return jsonify({"message": "Holiday deleted"}), 200
 
 if __name__ == '__main__':
+    with app.app_context():
+        db.create_all()
     app.run(debug=True)
