@@ -11,7 +11,7 @@ from dateutil.relativedelta import relativedelta
 from flask_bcrypt import Bcrypt
 from dotenv import load_dotenv
 
-# FINAL-VERSION-CHECK-BACKEND-V13
+# FINAL-VERSION-CHECK-BACKEND-V14
 load_dotenv()
 
 # --- Initialization & Configuration ---
@@ -185,7 +185,6 @@ def delete_holiday(id):
     holiday = Holiday.query.get_or_404(id); db.session.delete(holiday); db.session.commit()
     return jsonify({"message": "Holiday deleted"}), 200
 
+# --- FIX: Removed db.create_all() from the main execution block ---
 if __name__ == '__main__':
-    with app.app_context():
-        db.create_all()
     app.run(debug=True)
