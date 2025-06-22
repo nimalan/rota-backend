@@ -29,9 +29,16 @@ db = SQLAlchemy(app)
 ma = Marshmallow(app)
 migrate = Migrate(app, db)
 
-# --- (Email Sending Function remains the same) ---
+# --- Email Sending Function ---
 def send_email(recipient_email, recipient_name, subject, body):
-    # ...
+    # This function is assumed to be working correctly with Brevo
+    brevo_api_key = os.getenv('BREVO_API_KEY')
+    sender_email = os.getenv('SENDER_EMAIL')
+    sender_name = os.getenv('SENDER_NAME', 'Rota App')
+    if not brevo_api_key or not sender_email:
+        print("!!! Email not sent: BREVO_API_KEY or SENDER_EMAIL not set.")
+        return False
+    # ... email sending logic ...
     return True
 
 # --- Database Models ---
@@ -44,8 +51,8 @@ class User(db.Model):
 
 class Shift(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    start_time = db.Column(db.DateTime, nullable=False)
-    end_time = db.Column(db.DateTime, nullable=False)
+    start_time = db.Column(db.DateTime(timezone=True), nullable=False)
+    end_time = db.Column(db.DateTime(timezone=True), nullable=False)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=True)
     user = db.relationship('User', backref=db.backref('shifts', lazy=True))
     recurring_shift_id = db.Column(db.String(36), nullable=True)
@@ -76,6 +83,13 @@ user_schema=UserSchema(); users_schema=UserSchema(many=True)
 shift_schema=ShiftSchema(); shifts_schema=ShiftSchema(many=True)
 holiday_schema=HolidaySchema(); holidays_schema=HolidaySchema(many=True)
 
+# --- Datetime Helper Function ---
+def safe_fromisoformat(date_string):
+    """Safely create a timezone-aware datetime object from an ISO string."""
+    if date_string.endswith('Z'):
+        # Handles '2025-06-21T18:00:00.000Z' format from JavaScript
+        return datetime.fromisoformat(date_string.replace('Z', '+00:00'))
+    return datetime.fromisoformat(date_string)
 
 # --- API Routes ---
 @app.route('/')
@@ -88,12 +102,22 @@ def login():
         return user_schema.jsonify(user)
     return jsonify({'message': 'Invalid credentials.'}), 401
 
-# --- FIX: This function now correctly handles UTC datestrings from the frontend ---
-def safe_fromisoformat(date_string):
-    """Safely create a datetime object from an ISO string, handling the 'Z'."""
-    if date_string.endswith('Z'):
-        return datetime.fromisoformat(date_string[:-1] + '+00:00')
-    return datetime.fromisoformat(date_string)
+@app.route('/users', methods=['GET'])
+def get_users():
+    return jsonify(users_schema.dump(User.query.all()))
+
+@app.route('/shifts', methods=['GET'])
+def get_shifts():
+    start_date_str = request.args.get('start_date')
+    end_date_str = request.args.get('end_date')
+    if not start_date_str or not end_date_str:
+        return jsonify({"message": "start_date and end_date are required"}), 400
+    
+    start_date = safe_fromisoformat(start_date_str)
+    end_date = safe_fromisoformat(end_date_str)
+    
+    shifts = Shift.query.filter(Shift.start_time >= start_date, Shift.start_time <= end_date).all()
+    return jsonify(shifts_schema.dump(shifts))
 
 @app.route('/shifts', methods=['POST'])
 def create_shifts():
@@ -145,8 +169,25 @@ def update_shift(id):
             shift.user_id = data.get('user_id', shift.user_id)
         db.session.commit()
         return jsonify(shifts_schema.dump(future_shifts))
+        
+@app.route('/holidays', methods=['GET'])
+def get_holidays():
+    holidays = Holiday.query.all()
+    return jsonify(holidays_schema.dump(holidays))
 
-# ... (other endpoints) ...
+@app.route('/holidays', methods=['POST'])
+def request_holiday():
+    data = request.get_json()
+    new_holiday = Holiday(
+        user_id=data['user_id'],
+        start_date=safe_fromisoformat(data['start_date']).date(),
+        end_date=safe_fromisoformat(data['end_date']).date(),
+        notes=data.get('notes')
+    )
+    db.session.add(new_holiday); db.session.commit()
+    return holiday_schema.jsonify(new_holiday), 201
+
+# ... other routes can be added here ...
 
 if __name__ == '__main__':
     app.run(debug=True)
