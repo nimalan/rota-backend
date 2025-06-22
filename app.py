@@ -11,7 +11,7 @@ from dateutil.relativedelta import relativedelta
 from flask_bcrypt import Bcrypt
 from dotenv import load_dotenv
 
-# FINAL-VERSION-CHECK-BACKEND-V20
+# FINAL-VERSION-CHECK-BACKEND-V21
 load_dotenv()
 
 # --- Initialization & Configuration ---
@@ -34,12 +34,12 @@ migrate = Migrate(app, db)
 # --- Datetime Helper ---
 def safe_fromisoformat(date_string):
     """Safely create a timezone-aware UTC datetime object from an ISO string."""
-    if isinstance(date_string, str) and date_string.endswith('Z'):
-        dt = datetime.fromisoformat(date_string.replace('Z', '+00:00'))
-    else:
-        dt = datetime.fromisoformat(date_string)
+    if not isinstance(date_string, str):
+        return date_string # Or handle as an error
     
-    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    dt = datetime.fromisoformat(date_string.replace('Z', '+00:00'))
+    # If the datetime object is naive, assume it's UTC. If it has a timezone, convert it to UTC.
+    return dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
 # --- Database Models ---
@@ -126,7 +126,6 @@ def create_shifts():
         duration_months = int(data.get('recurrence_months', 1)); end_date = start_time_aware + relativedelta(months=+duration_months)
         recurring_id = os.urandom(16).hex(); created_shifts = []; current_date = start_time_aware
         while current_date.date() < end_date.date():
-            # --- FIX: Use datetime.combine() to explicitly create timezone-aware objects ---
             shift_start_dt = datetime.combine(current_date.date(), shift_start_time, tzinfo=timezone.utc)
             shift_end_dt = datetime.combine(current_date.date(), shift_end_time, tzinfo=timezone.utc)
             new_shift = Shift(start_time=shift_start_dt, end_time=shift_end_dt, user_id=data.get('user_id'), recurring_shift_id=recurring_id)
@@ -149,7 +148,6 @@ def update_shift(id):
         new_start_time_obj = new_start_dt.time(); new_end_time_obj = new_end_dt.time()
         for shift in future_shifts:
             date = shift.start_time.date()
-            # --- FIX: Use datetime.combine() to explicitly create timezone-aware objects ---
             shift.start_time = datetime.combine(date, new_start_time_obj, tzinfo=timezone.utc)
             shift.end_time = datetime.combine(date, new_end_time_obj, tzinfo=timezone.utc)
             shift.user_id = data.get('user_id', shift.user_id)
