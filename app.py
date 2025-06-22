@@ -33,7 +33,7 @@ migrate = Migrate(app, db)
 
 # --- Datetime Helper Function ---
 def safe_fromisoformat(date_string):
-    if date_string.endswith('Z'):
+    if isinstance(date_string, str) and date_string.endswith('Z'):
         return datetime.fromisoformat(date_string.replace('Z', '+00:00'))
     return datetime.fromisoformat(date_string)
 
@@ -67,9 +67,6 @@ class UserSchema(ma.SQLAlchemyAutoSchema):
     class Meta:
         model = User; load_instance = True; exclude = ("password",) 
 
-# --- THIS IS THE FIX ---
-# We are now explicitly telling Marshmallow to format the datetimes
-# using the full ISO 8601 standard, which includes the timezone offset.
 class ShiftSchema(ma.SQLAlchemyAutoSchema):
     start_time = ma.DateTime(format='iso')
     end_time = ma.DateTime(format='iso')
@@ -78,6 +75,8 @@ class ShiftSchema(ma.SQLAlchemyAutoSchema):
     user = ma.Nested(UserSchema, only=("id", "username", "email"))
 
 class HolidaySchema(ma.SQLAlchemyAutoSchema):
+    start_date = ma.Date(format='iso')
+    end_date = ma.Date(format='iso')
     class Meta:
         model = Holiday; include_fk = True; load_instance = True
     user = ma.Nested(UserSchema, only=("id", "username"))
@@ -87,18 +86,39 @@ shift_schema=ShiftSchema(); shifts_schema=ShiftSchema(many=True)
 holiday_schema=HolidaySchema(); holidays_schema=HolidaySchema(many=True)
 
 # --- API Routes ---
-# (The rest of the file remains the same)
 @app.route('/')
 def home(): return "Welcome!"
+
+@app.route('/setup-admin', methods=['GET'])
+def setup_admin():
+    with app.app_context():
+        admin_user = User.query.filter_by(email='admin@example.com').first()
+        hashed_password = bcrypt.generate_password_hash("password").decode('utf-8')
+        if admin_user:
+            admin_user.password = hashed_password
+            db.session.commit()
+            return jsonify({"message": "Default admin password has been reset."}), 200
+        else:
+            new_admin = User(username='admin', email='admin@example.com', password=hashed_password, role='admin')
+            db.session.add(new_admin); db.session.commit()
+            return jsonify({"message": "Default admin created successfully."}), 201
+
 @app.route('/login', methods=['POST'])
 def login():
-    data = request.get_json(); user = User.query.filter_by(email=data['email']).first()
-    if user and bcrypt.check_password_hash(user.password, data['password']):
+    data = request.get_json(); user = User.query.filter_by(email=data.get('email')).first()
+    if user and bcrypt.check_password_hash(user.password, data.get('password', '')):
         return user_schema.jsonify(user)
     return jsonify({'message': 'Invalid credentials.'}), 401
 
 @app.route('/users', methods=['GET'])
 def get_users(): return jsonify(users_schema.dump(User.query.all()))
+
+@app.route('/users', methods=['POST'])
+def add_user():
+    data = request.get_json(); hashed_password = bcrypt.generate_password_hash(data['password']).decode('utf-8')
+    new_user = User(username=data['username'], email=data['email'], password=hashed_password, role=data.get('role', 'employee'))
+    db.session.add(new_user); db.session.commit()
+    return user_schema.jsonify(new_user), 201
 
 @app.route('/shifts', methods=['GET'])
 def get_shifts():
@@ -146,5 +166,47 @@ def update_shift(id):
             shift.user_id = data.get('user_id', shift.user_id)
         db.session.commit(); return jsonify(shifts_schema.dump(future_shifts))
 
+@app.route('/shifts/<int:id>', methods=['DELETE'])
+def delete_shift(id):
+    shift_to_delete = Shift.query.get_or_404(id)
+    data = request.get_json() or {}
+    apply_to_all = data.get('apply_to_all', False)
+    if not apply_to_all or not shift_to_delete.recurring_shift_id:
+        db.session.delete(shift_to_delete); db.session.commit()
+        return jsonify({'message': 'Shift deleted successfully.'})
+    else:
+        recurring_id = shift_to_delete.recurring_shift_id
+        future_shifts = Shift.query.filter(Shift.recurring_shift_id == recurring_id, Shift.start_time >= shift_to_delete.start_time).all()
+        for shift in future_shifts:
+            db.session.delete(shift)
+        db.session.commit()
+        return jsonify({'message': f'{len(future_shifts)} recurring shifts deleted.'})
+
+@app.route('/holidays', methods=['GET'])
+def get_holidays():
+    return jsonify(holidays_schema.dump(Holiday.query.all()))
+
+@app.route('/holidays', methods=['POST'])
+def request_holiday():
+    data = request.get_json()
+    new_holiday = Holiday(user_id=data['user_id'], start_date=safe_fromisoformat(data['start_date']).date(), end_date=safe_fromisoformat(data['end_date']).date(), notes=data.get('notes'))
+    db.session.add(new_holiday); db.session.commit()
+    return holiday_schema.jsonify(new_holiday), 201
+
+@app.route('/holidays/<int:id>', methods=['PUT'])
+def amend_holiday(id):
+    holiday = Holiday.query.get_or_404(id); data = request.get_json()
+    if 'status' in data and data['status'] in ['approved', 'rejected']:
+        holiday.status = data['status']
+    db.session.commit(); return holiday_schema.jsonify(holiday)
+
+@app.route('/holidays/<int:id>', methods=['DELETE'])
+def delete_holiday(id):
+    holiday = Holiday.query.get_or_404(id)
+    db.session.delete(holiday); db.session.commit()
+    return jsonify({"message": "Holiday deleted"}), 200
+
 if __name__ == '__main__':
+    with app.app_context():
+        db.create_all()
     app.run(debug=True)
