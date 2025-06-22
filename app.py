@@ -4,14 +4,15 @@ from flask import Flask, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
 from flask_marshmallow import Marshmallow
-from marshmallow import fields # This is the correct import
+from marshmallow import fields 
 from flask_cors import CORS
 from datetime import datetime, time, timedelta
 from dateutil.relativedelta import relativedelta
 from flask_bcrypt import Bcrypt
 from dotenv import load_dotenv
+import pytz # Using pytz for robust timezone handling
 
-# FINAL-VERSION-CHECK-BACKEND-V14
+# FINAL-VERSION-CHECK-BACKEND-V15
 load_dotenv()
 
 # --- Initialization & Configuration ---
@@ -74,6 +75,10 @@ def home(): return "Welcome!"
 
 @app.route('/setup-admin', methods=['GET'])
 def setup_admin():
+    # --- FIX: Secure this endpoint so it only runs in a development environment ---
+    if not app.debug:
+        return jsonify({"message": "This setup route is disabled in production."}), 403
+        
     with app.app_context():
         admin_user = User.query.filter_by(email='admin@example.com').first()
         hashed_password = bcrypt.generate_password_hash("password").decode('utf-8')
@@ -85,7 +90,6 @@ def setup_admin():
             db.session.add(new_admin); db.session.commit()
             return jsonify({"message": "Default admin created successfully."}), 201
 
-# (All other routes for login, users, shifts, and holidays are included and correct)
 @app.route('/login', methods=['POST'])
 def login():
     data = request.get_json(); user = User.query.filter_by(email=data.get('email')).first()
@@ -135,17 +139,27 @@ def create_shifts():
 @app.route('/shifts/<int:id>', methods=['PUT'])
 def update_shift(id):
     shift_to_update = Shift.query.get_or_404(id); data = request.get_json(); apply_to_all = data.get('apply_to_all', False)
+    
+    new_start_dt = safe_fromisoformat(data['start_time'])
+    new_end_dt = safe_fromisoformat(data['end_time'])
+
     if not apply_to_all or not shift_to_update.recurring_shift_id:
-        shift_to_update.start_time = safe_fromisoformat(data['start_time']); shift_to_update.end_time = safe_fromisoformat(data['end_time'])
+        shift_to_update.start_time = new_start_dt; shift_to_update.end_time = new_end_dt
         shift_to_update.user_id = data.get('user_id', shift_to_update.user_id); shift_to_update.recurring_shift_id = None 
         db.session.commit(); return shift_schema.jsonify(shift_to_update)
     else:
+        # --- FIX: Use correct logic for updating recurring shifts ---
         recurring_id = shift_to_update.recurring_shift_id
         future_shifts = Shift.query.filter(Shift.recurring_shift_id == recurring_id, Shift.start_time >= shift_to_update.start_time).all()
-        new_start_time = safe_fromisoformat(data['start_time']).time(); new_end_time = safe_fromisoformat(data['end_time']).time()
+        
+        new_start_time_obj = new_start_dt.time()
+        new_end_time_obj = new_end_dt.time()
+
         for shift in future_shifts:
-            shift.start_time = shift.start_time.replace(hour=new_start_time.hour, minute=new_start_time.minute, second=0, microsecond=0)
-            shift.end_time = shift.start_time.replace(hour=new_end_time.hour, minute=new_end_time.minute, second=0, microsecond=0)
+            date = shift.start_time.date()
+            # Combine the original date with the new times, preserving the timezone from the original shift
+            shift.start_time = pytz.utc.localize(datetime.combine(date, new_start_time_obj))
+            shift.end_time = pytz.utc.localize(datetime.combine(date, new_end_time_obj))
             shift.user_id = data.get('user_id', shift.user_id)
         db.session.commit(); return jsonify(shifts_schema.dump(future_shifts))
 
