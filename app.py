@@ -51,6 +51,7 @@ class User(db.Model):
 
 class Shift(db.Model):
     id = db.Column(db.Integer, primary_key=True)
+    # --- UPDATED: Ensure DateTime columns are timezone-aware ---
     start_time = db.Column(db.DateTime(timezone=True), nullable=False)
     end_time = db.Column(db.DateTime(timezone=True), nullable=False)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=True)
@@ -87,7 +88,6 @@ holiday_schema=HolidaySchema(); holidays_schema=HolidaySchema(many=True)
 def safe_fromisoformat(date_string):
     """Safely create a timezone-aware datetime object from an ISO string."""
     if date_string.endswith('Z'):
-        # Handles '2025-06-21T18:00:00.000Z' format from JavaScript
         return datetime.fromisoformat(date_string.replace('Z', '+00:00'))
     return datetime.fromisoformat(date_string)
 
@@ -112,10 +112,8 @@ def get_shifts():
     end_date_str = request.args.get('end_date')
     if not start_date_str or not end_date_str:
         return jsonify({"message": "start_date and end_date are required"}), 400
-    
     start_date = safe_fromisoformat(start_date_str)
     end_date = safe_fromisoformat(end_date_str)
-    
     shifts = Shift.query.filter(Shift.start_time >= start_date, Shift.start_time <= end_date).all()
     return jsonify(shifts_schema.dump(shifts))
 
@@ -131,16 +129,17 @@ def create_shifts():
         db.session.add(new_shift); db.session.commit()
         return shift_schema.jsonify(new_shift), 201
     else:
-        start_date = safe_fromisoformat(data['start_time'])
-        shift_start_time = start_date.time()
+        start_date_aware = safe_fromisoformat(data['start_time'])
+        shift_start_time = start_date_aware.time()
         shift_end_time = safe_fromisoformat(data['end_time']).time()
         duration_months = int(data.get('recurrence_months', 1))
-        end_date = start_date + relativedelta(months=+duration_months)
+        end_date = start_date_aware + relativedelta(months=+duration_months)
         recurring_id = os.urandom(16).hex(); created_shifts = []
-        current_date = start_date
+        current_date = start_date_aware
         while current_date.date() < end_date.date():
-            shift_start_dt = datetime.combine(current_date.date(), shift_start_time)
-            shift_end_dt = datetime.combine(current_date.date(), shift_end_time)
+            # --- FIX: Use replace() to preserve timezone info ---
+            shift_start_dt = current_date.replace(hour=shift_start_time.hour, minute=shift_start_time.minute, second=0, microsecond=0)
+            shift_end_dt = current_date.replace(hour=shift_end_time.hour, minute=shift_end_time.minute, second=0, microsecond=0)
             new_shift = Shift(start_time=shift_start_dt, end_time=shift_end_dt, user_id=data.get('user_id'), recurring_shift_id=recurring_id)
             db.session.add(new_shift); created_shifts.append(new_shift)
             current_date += timedelta(weeks=1)
@@ -164,8 +163,9 @@ def update_shift(id):
         new_start_time = safe_fromisoformat(data['start_time']).time()
         new_end_time = safe_fromisoformat(data['end_time']).time()
         for shift in future_shifts:
-            shift.start_time = datetime.combine(shift.start_time.date(), new_start_time)
-            shift.end_time = datetime.combine(shift.end_time.date(), new_end_time)
+            # --- FIX: Use replace() to preserve timezone info ---
+            shift.start_time = shift.start_time.replace(hour=new_start_time.hour, minute=new_start_time.minute, second=0, microsecond=0)
+            shift.end_time = shift.end_time.replace(hour=new_end_time.hour, minute=new_end_time.minute, second=0, microsecond=0)
             shift.user_id = data.get('user_id', shift.user_id)
         db.session.commit()
         return jsonify(shifts_schema.dump(future_shifts))
@@ -186,8 +186,6 @@ def request_holiday():
     )
     db.session.add(new_holiday); db.session.commit()
     return holiday_schema.jsonify(new_holiday), 201
-
-# ... other routes can be added here ...
 
 if __name__ == '__main__':
     app.run(debug=True)
