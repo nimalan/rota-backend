@@ -11,7 +11,7 @@ from dateutil.relativedelta import relativedelta
 from flask_bcrypt import Bcrypt
 from dotenv import load_dotenv
 
-# FINAL-VERSION-CHECK-BACKEND-V21
+# FINAL-VERSION-CHECK-BACKEND-V22
 load_dotenv()
 
 # --- Initialization & Configuration ---
@@ -35,11 +35,10 @@ migrate = Migrate(app, db)
 def safe_fromisoformat(date_string):
     """Safely create a timezone-aware UTC datetime object from an ISO string."""
     if not isinstance(date_string, str):
-        return date_string # Or handle as an error
+        raise ValueError("Invalid date format: Expected a string.")
     
     dt = datetime.fromisoformat(date_string.replace('Z', '+00:00'))
-    # If the datetime object is naive, assume it's UTC. If it has a timezone, convert it to UTC.
-    return dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
 # --- Database Models ---
@@ -118,7 +117,7 @@ def create_shifts():
     data = request.get_json(); start_time_aware = safe_fromisoformat(data['start_time']); end_time_aware = safe_fromisoformat(data['end_time'])
     is_recurring = data.get('is_recurring', False)
     if not is_recurring:
-        new_shift = Shift(start_time=start_time_aware, end_time=end_time_aware, user_id=data.get('user_id'))
+        new_shift = Shift(start_time=start_time_aware.astimezone(timezone.utc), end_time=end_time_aware.astimezone(timezone.utc), user_id=data.get('user_id'))
         db.session.add(new_shift); db.session.commit()
         return shift_schema.jsonify(new_shift), 201
     else:
